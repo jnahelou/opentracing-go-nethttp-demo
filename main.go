@@ -2,56 +2,76 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"time"
 
-	"github.com/uber/jaeger-client-go"
+	"github.com/opentracing-contrib/go-stdlib/nethttp"
+	opentracing "github.com/opentracing/opentracing-go"
+	jaeger "github.com/uber/jaeger-client-go"
 	"github.com/uber/jaeger-client-go/transport/zipkin"
+	zipkinC "github.com/uber/jaeger-client-go/zipkin"
 )
 
 var (
 	zipkinURL = flag.String("url",
-		"http://localhost:9411/api/v1/spans", "Zipkin server URL")
+		"http://zipkin.istio-system.svc.cluster.local:9411/api/v1/spans", "Zipkin server URL")
 	serverPort = flag.String("port", "8000", "server port")
-	actorKind  = flag.String("actor", "server", "server or client")
+	traceLabel = "opentracing-go-nethttp-demo"
 )
 
-const (
-	server = "server"
-	client = "client"
-)
+func getTime(w http.ResponseWriter, r *http.Request) {
+	log.Print("Received getTime request")
+	t := time.Now()
+	ts := t.Format("Mon Jan _2 15:04:05 2006")
+	io.WriteString(w, fmt.Sprintf("The time is %s", ts))
+}
+
+func redirect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/gettime", 301)
+}
 
 func main() {
 	flag.Parse()
 
-	if *actorKind != server && *actorKind != client {
-		log.Fatal("Please specify '-actor server' or '-actor client'")
-	}
+	zipkinPropagator := zipkinC.NewZipkinB3HTTPHeaderPropagator()
+	injector := jaeger.TracerOptions.Injector(opentracing.HTTPHeaders, zipkinPropagator)
+	extractor := jaeger.TracerOptions.Extractor(opentracing.HTTPHeaders, zipkinPropagator)
+	zipkinSharedRPCSpan := jaeger.TracerOptions.ZipkinSharedRPCSpan(true)
 
-	// Jaeger tracer can be initialized with a transport that will
-	// report tracing Spans to a Zipkin backend
+	// Set Transport type
 	transport, err := zipkin.NewHTTPTransport(
 		*zipkinURL,
 		zipkin.HTTPBatchSize(1),
 		zipkin.HTTPLogger(jaeger.StdLogger),
 	)
 	if err != nil {
-		log.Fatalf("Cannot initialize HTTP transport: %v", err)
+		log.Fatalf("HTTP transport error: %v", err)
 	}
-	// create Jaeger tracer
+
+	// Create tracer
 	tracer, closer := jaeger.NewTracer(
-		*actorKind,
-		jaeger.NewConstSampler(true), // sample all traces
-		jaeger.NewRemoteReporter(transport, nil),
+		traceLabel,
+		jaeger.NewConstSampler(true),
+		jaeger.NewRemoteReporter(transport),
+		injector,
+		extractor,
+		zipkinSharedRPCSpan,
 	)
 
-	if *actorKind == server {
-		runServer(tracer)
-		return
+	// Create HTTP Server
+	http.HandleFunc("/gettime", getTime)
+	http.HandleFunc("/", redirect)
+	log.Printf("Starting server on port %s", *serverPort)
+	err = http.ListenAndServe(
+		fmt.Sprintf(":%s", *serverPort),
+		// use nethttp.Middleware to enable OpenTracing for server
+		nethttp.Middleware(tracer, http.DefaultServeMux))
+	if err != nil {
+		log.Fatalf("Cannot start server: %s", err)
 	}
 
-	runClient(tracer)
-
-	// Close the tracer to guarantee that all spans that could
-	// be still buffered in memory are sent to the tracing backend
 	closer.Close()
 }

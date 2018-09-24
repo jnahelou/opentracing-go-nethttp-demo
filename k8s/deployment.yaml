@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opentracing-go-nethttp-demo 
+  labels:
+    app: opentracing-go-nethttp-demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: opentracing-go-nethttp-demo
+  template:
+    metadata:
+      labels:
+        app: opentracing-go-nethttp-demo
+    spec:
+      containers:
+      - name: opentracing-go-nethttp-demo
+        image: localhost:5000/opentracing-go-nethttp-demo:1.0
+        ports:
+        - containerPort: 8000
+
+---
+## Without Istio
+#apiVersion: v1
+#kind: Service
+#metadata:
+#  name: opentracing-go-nethttp-demo-node
+#spec:
+#  ports:
+#  - port: 8000
+#    protocol: TCP
+#    targetPort: 8000
+#  selector:
+#    app: opentracing-go-nethttp-demo
+#  type: NodePort
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opentracing-go-nethttp-demo-cluster
+spec:
+  type: ClusterIP
+  ports:
+   - name: http
+     port: 8000
+     protocol: TCP
+     targetPort: 8000
+  selector:
+    app: opentracing-go-nethttp-demo
+---
+#Using Istio
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: opentracing-go-nethttp-demo-gateway
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: opentracing-go-nethttp-demo-vs
+spec:
+  hosts:
+  - "tracing.192.168.99.100.xip.io"
+  gateways:
+  - opentracing-go-nethttp-demo-gateway
+  http:
+  - route:
+    - destination:
+        host: opentracing-go-nethttp-demo-cluster
+        port:
+          number: 8000
+
